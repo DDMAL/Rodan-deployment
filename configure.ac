@@ -2,6 +2,7 @@
 AC_INIT(Rodan Dockerfile,0.01)
 AC_COPYRIGHT(Copyright 2011-2015 Distributed Digital Music Archives and Libraries Lab)
 
+set -e
 
 # Check out Rodan source code from git repository if needed
 AC_ARG_VAR([GIT_CLONE_URL], [Git clone URL of Rodan code (only folder "Rodan" does not exist in this directory, default https://github.com/DDMAL/Rodan.git)])
@@ -21,8 +22,7 @@ else
     BRANCH=develop
   fi
 
-  eval git clone --recursive $GIT_CLONE_URL Rodan
-  (cd Rodan && eval git checkout $BRANCH)
+  eval git clone --recursive $GIT_CLONE_URL -b $BRANCH Rodan
 fi
 
 
