@@ -1,0 +1,19 @@
+1. Install Docker, autoconf, git
+
+2. Run `autoconf`
+
+3. (optional) Copy your Rodan source code here as folder `Rodan`.
+
+4a. For server run:
+./configure MODE=server DB_PASSWORD="!@#%" DOMAIN_NAME="206.12.59.179" WORKERS_SUBNET="192.168.125.0/24" CLIENT_MAX_BODY_SIZE=200M RODAN_DATA_DIR=/mnt/rodan_data
+
+4b. For worker, run:
+./configure MODE=worker DB_PASSWORD="!@#%" DB_HOST="192.168.125.2" CELERY_BROKER_URL="amqp://rodanuser:DDMALrodan@192.168.125.2:5672/DDMAL" SERVER_IP="192.168.125.2"
+
+(If you skipped step 3, you need to provide `GIT_CLONE_URL="https://github.com/DDMAL/Rodan.git" BRANCH=develop` in step 4.)
+
+5. Copy Kakadu source code in this folder (e.g. v7_7-01273N.zip)
+
+6. Run `sh deploy.sh`
+
+

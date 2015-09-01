@@ -1,0 +1,13 @@
+# autoconf
+configure
+config.status
+config.log
+autom4te.cache
+
+Dockerfile
+deploy.sh
+v7_7-01273N.zip
+Rodan
+
+# ignore emacs autosave file
+*~
