@@ -147,27 +147,7 @@ RUN     mkdir /mnt/rodan_data
 RUN     autoconf
 RUN     ./configure --enable-debug=no @CONFIGURE_DIVA@ RODAN_VENV_DIR=/srv/webapps/Rodan/rodan_env/ RODAN_DATA_DIR=/mnt/rodan_data DB_NAME="@DB_NAME@" DB_USER="@DB_USER@" DB_PASSWORD="@DB_PASSWORD@" DB_HOST="@DB_HOST@" DB_PORT="@DB_PORT@" DOMAIN_NAME="@DOMAIN_NAME@" IIPSRV_FCGI=/srv/fcgi-bin/iipsrv.fcgi MODE="@MODE@" CELERY_BROKER_URL="@CELERY_BROKER_URL@" CLIENT_MAX_BODY_SIZE="@CLIENT_MAX_BODY_SIZE@" REDIS_HOST="@REDIS_HOST@"
 
-## Create database trigger function
-@IF_SERVER@RUN  service postgresql start && source ./rodan_env/bin/activate && python manage.py makemigrations && sudo -u postgres psql -d rodan --command $'create language plpythonu;\
-@IF_SERVER@        CREATE OR REPLACE FUNCTION publish_message(notify text) RETURNS void AS $$\n\
-@IF_SERVER@            import json\n\
-@IF_SERVER@            import redis\n\
-@IF_SERVER@            info = notify.split("/")\n\
-@IF_SERVER@            status = info[0]\n\
-@IF_SERVER@            model = info[1].replace("rodan_","")\n\
-@IF_SERVER@            uuid = info[2].replace("-","")\n\
-@IF_SERVER@            data = {\n\
-@IF_SERVER@                "status": status,\n\
-@IF_SERVER@                "model": model,\n\
-@IF_SERVER@                "uuid": uuid\n\
-@IF_SERVER@            }\n\
-@IF_SERVER@            r = redis.StrictRedis("@REDIS_HOST@", 6379, db=0)\n\
-@IF_SERVER@            r.publish("rodan:broadcast:rodan", json.dumps(data))\n\
-@IF_SERVER@        $$ LANGUAGE plpythonu;\n\
-@IF_SERVER@        GRANT EXECUTE ON FUNCTION publish_message(notify text) TO rodan;' && python manage.py migrate
-
-
-## [TODO] don't use global python package
+## Install global python package redis for database trigger function
 @IF_SERVER@RUN     pip install redis
 
 ## Set up permission
@@ -187,8 +167,8 @@ RUN     chown www-data:www-data /mnt/rodan_data
 ## Configure supervisor
 RUN     cp etc/supervisor/conf.d/rodan.conf /etc/supervisor/conf.d/
 
-## Create super user for Rodan
-@IF_SERVER@RUN     service postgresql start && source ./rodan_env/bin/activate && echo "from django.contrib.auth.models import User; User.objects.create_superuser('@ADMIN_USER@', '', '@ADMIN_PASSWORD@')" | python manage.py shell
+## Migrate database and create super user for Rodan
+@IF_SERVER@RUN     service postgresql start && service redis-server start && source ./rodan_env/bin/activate && python manage.py makemigrations && RODAN_PSQL_SUPERUSER_COMMAND='sudo -u postgres psql -d rodan' python manage.py migrate && echo "from django.contrib.auth.models import User; User.objects.create_superuser('@ADMIN_USER@', '', '@ADMIN_PASSWORD@')" | python manage.py shell
 
 ## Set up NFS folder
 @IF_SERVER@RUN     echo "/mnt/rodan_data @WORKERS_SUBNET@(rw,sync,fsid=0,no_subtree_check,no_root_squash)" >> /etc/exports
