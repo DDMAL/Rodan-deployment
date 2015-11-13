@@ -1,21 +1,23 @@
-Recommended environment: Ubuntu 14.04
+Example usage:
 
-1. Install Docker, autoconf, git
-
-2. Run `autoconf`
-
-3. (optional) Copy your Rodan source code here as folder `Rodan`.
-
-4a. For server run:
-./configure MODE=server DB_PASSWORD="!@#%" DOMAIN_NAME="rodan.simssa.ca" WORKERS_SUBNET="192.168.125.0/24" CLIENT_MAX_BODY_SIZE=200M RODAN_DATA_DIR=/mnt/rodan_data
-
-4b. For worker, run:
-./configure MODE=worker DB_PASSWORD="!@#%" DB_HOST="192.168.125.2" CELERY_BROKER_URL="amqp://rodanuser:DDMALrodan@192.168.125.2:5672/DDMAL" SERVER_IP="192.168.125.2"
-
-(If you skipped step 3, you need to provide `GIT_CLONE_URL="https://github.com/DDMAL/Rodan.git" BRANCH=develop` in step 4.)
-
-5. Copy Kakadu source code in this folder (e.g. v7_7-01273N.zip)
-
-6. Run `sh deploy.sh`
-
-
+python configure.py \
+  --output-script-type bash \
+  --output-folder build \
+  --os ubuntu:14.04 \
+  --db-password hahaha \
+  --db-su-password hahahasu \
+  --nfs-server-directory /data \
+  --server-domain-name rodan-dev.simssa.ca \
+  --server-paginate-by 50 \
+  --server-client-max-body-size 500M \
+  --server-ssl-cert-path /etc/ssl/rodan.crt \
+  --server-ssl-cert-key-path /etc/ssl/rodan.key \
+  --rodan-app-directory /srv/webapps/Rodan \
+  --rodan-data-mount-point /mnt/rodan_data \
+  --package-src-directory /root/src \
+  --rodan-admin-user admin \
+  --rodan-admin-password hahaha \
+  rodan_task_queue@192.168.1.100 \
+  rodan_database+rodan_resource_file_server@192.168.1.101 \
+  rodan_worker+rodan_web_server@192.168.1.102 \
+  rodan_worker@192.168.1.103
