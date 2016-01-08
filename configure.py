@@ -1,7 +1,7 @@
 """
 Rodan Deployment Tool
 
-Copyright 2011-2015 Distributed Digital Music Archives and Libraries Lab
+Copyright 2011-2016 Distributed Digital Music Archives and Libraries Lab
 """
 __version__ = '1.0.0'
 
@@ -22,29 +22,13 @@ def MSG_ERROR(msg):
 def MSG_NOTICE(msg):
     print msg
 
-def RUN(cmd, script_type):
-    "shortcut function as there are too many RUNs"
-    if script_type == "bash":
-        return cmd.strip()
-    elif script_type == 'dockerfile':
-        return "RUN     {0}".format(cmd.strip())
-
-def COPY(src, dest, script_type):
-    "shortcut function as there are too many COPY operations"
-    if script_type == "bash":
-        return "cp $BASE_DIR/{0} {1}".format(src, dest)
-    elif script_type == 'dockerfile':
-        return "COPY    {0} {1}".format(src, dest)
-
-
 def main():
     parser = argparse.ArgumentParser(description='''
-Generate bash scripts that install Rodan on distributed machines, or generate Dockerfiles that test Rodan deployment in distributed Docker containers.
+Generate bash scripts that install Rodan on distributed machines with a Vagrantfile for testing in multiple VMs.
 
 Examples:
  TODO
 ''')
-    parser.add_argument('--output-script-type', required=True, type=str, choices=('bash', 'dockerfile'), help="output script type")
     parser.add_argument('--output-folder', required=True, type=str, help="output folder")
     parser.add_argument('MACHINE_CONFIGURATION', nargs='+', type=str, help="a '+' separated combination of Rodan components that include: 'rodan_task_queue', 'rodan_database', 'rodan_resource_file_server', 'rodan_worker', and 'rodan_web_server'.\nRestriction: 'rodan_worker' should appear at least once but other components should exactly appear once.\nExample: \nrodan_database+rodan_resource_file_server rodan_task_queue+rodan_worker rodan_worker rodan_web_server+rodan_worker")
     parser.add_argument('--os', required=True, type=str, choices=('ubuntu:14.04', ), help="base operating system name:version (for now, only supports ubuntu 14.04)")
@@ -157,301 +141,330 @@ Examples:
     with open(os.path.join(args.output_folder, "configuration.json"), 'w') as g:
         json.dump(args.__dict__, g, indent=4, sort_keys=True)
 
-    ## write scripts
+
+    ## generate shell commands (a list of list)
+    shell_commands = []
+
     for i, components in enumerate(components_cleaned):
-        script_filename = os.path.join(args.output_folder, "{0}.{1}".format(i+1, args.output_script_type))
+        cmds = []
+
+        ## Check if source codes are provided
+        if 'rodan_worker' in components or 'rodan_web_server' in components:
+            # check Rodan source code
+            cmds.append("""if test ! -d {0}Rodan; then
+  echo "Please put Rodan source code under "{0}Rodan", and try again.";
+  exit 1;
+fi""".format(args.package_src_directory))
+
+            cmds.append("""if test ! -f {0}Rodan/requirements.txt; then
+  echo "Cannot find '{0}Rodan/requirements.txt'. Please check your Rodan source and try again."
+  exit 1;
+fi""".format(args.package_src_directory))
+
+            if not args.disable_diva:
+                # check kakadu 7.7
+                cmds.append("""if test ! -f {0}v7_7-01273N.zip; then
+  echo "Cannot find '{0}v7_7-01273N.zip'. Please copy your Kakadu source here and try again."
+  exit 1;
+fi""".format(args.package_src_directory))
+
+        ## Check if SSL cert and key are provided (only server)
+        if 'rodan_web_server' in components:
+            cmds.append("""if test ! -f {0}; then
+  echo "Please put Rodan server SSL certificate at '{0}', and try again.";
+  exit 1;
+fi""".format(args.server_ssl_cert_path))
+            cmds.append("""if test ! -f {0}; then
+  echo "Please put Rodan server SSL private key at '{0}', and try again.";
+  exit 1;
+fi""".format(args.server_ssl_cert_key_path))
+
+
+        ## update system
+        cmds.append('apt-get -y update && apt-get -y upgrade')
+
+        ## Add swap memory (some packages require a lot of mem, such as lxml)
+        cmds.append('dd if=/dev/zero of=/swapfile bs=1024 count=1000000')
+        cmds.append('chmod 600 /swapfile')
+        cmds.append('mkswap /swapfile')
+        cmds.append('swapon /swapfile')
+
+        if 'rodan_task_queue' in components:
+            ## Install RabbitMQ: http://www.rabbitmq.com/install-debian.html
+            cmds.append('apt-get install -y wget')
+            cmds.append('echo "# RabbitMQ" >> /etc/apt/sources.list')
+            cmds.append('echo "deb http://www.rabbitmq.com/debian/ testing main" >> /etc/apt/sources.list')
+            cmds.append('cd /tmp && wget https://www.rabbitmq.com/rabbitmq-signing-key-public.asc')
+            cmds.append('apt-key add /tmp/rabbitmq-signing-key-public.asc')
+            cmds.append('apt-get -y update')
+            cmds.append('apt-get -y install rabbitmq-server')
+            # set up RabbitMQ vhost
+            cmds.append('service rabbitmq-server start && rabbitmqctl add_user %(username)s %(password)s && rabbitmqctl add_vhost %(vhost)s && rabbitmqctl set_permissions -p %(vhost)s %(username)s ".*" ".*" ".*"' % {
+                'username': args.amqp_user,
+                'password': args.amqp_password,
+                'vhost': args.amqp_vhost
+            })
+
+        if 'rodan_database' in components:
+            ## Install PostgreSQL
+            cmds.append('apt-get -y install postgresql postgresql-contrib')
+            ## Install PostgreSQL Python language
+            cmds.append('apt-get -y install postgresql-plpython')
+            ## Redis server
+            cmds.append('apt-get -y install redis-server')
+            ## Configure NORMAL user
+            cmds.append("""service postgresql start && sudo -u postgres psql --command "create user %(user)s with password '%(password)s'; alter user %(user)s with createdb;" && sudo -u postgres psql --command 'create database %(name)s;' && sudo -u postgres psql --command 'grant all privileges on database "%(name)s" to %(user)s;'""" % {
+                'name': args.db_name,
+                'user': args.db_user,
+                'password': args.db_password
+            })
+            ## expose PostgreSQL to allow access from workers' and server's subnet as normal user
+            cmds.append("""echo "listen_addresses = '*'" >> /etc/postgresql/9.3/main/postgresql.conf && echo "#host  @DB_NAME@  @DB_USER@  @WORKERS_SUBNET@  md5" >> /etc/postgresql/9.3/main/pg_hba.conf""")
+            for machine_number in set(components_distribution['rodan_worker']+components_distribution['rodan_web_server']):
+                ip = ips_cleaned[machine_number]
+                cmds.append("""echo "host  %(name)s  %(user)s  %(subnet)s  md5" >> /etc/postgresql/9.3/main/pg_hba.conf""" % {
+                    'name': args.db_name,
+                    'user': args.db_user,
+                    'subnet': ip
+                })
+            ## Configure SUPERUSER
+            cmds.append("""service postgresql start && sudo -u postgres psql --command "create user %(su_user)s with password '%(su_password)s'; alter user %(su_user)s with superuser;" """ % {
+                'su_user': args.db_su_user,
+                'su_password': args.db_su_password
+            })
+            ## expose PostgreSQL to allow access from server as super user
+            for machine_number in set(components_distribution['rodan_web_server']):
+                ip = ips_cleaned[machine_number]
+                cmds.append("""echo "host  %(name)s  %(su_user)s  %(subnet)s  md5" >> /etc/postgresql/9.3/main/pg_hba.conf""" % {
+                    'name': args.db_name,
+                    'su_user': args.db_su_user,
+                    'subnet': ip
+                })
+            cmds.append('service postgresql restart')
+
+        if 'rodan_resource_file_server' in components:
+            # Check kernel modules
+            cmds.append('modprobe nfs && modprobe nfsd')
+            # Install NFS packages
+            cmds.append('apt-get -y install nfs-common inotify-tools nfs-kernel-server runit')
+            # set /etc/exports, expose the folder to workers' and server's subnet
+            accesses = []
+            for machine_number in set(components_distribution['rodan_worker']+components_distribution['rodan_web_server']):
+                ip = ips_cleaned[machine_number]
+                accesses.append("{0}(rw,sync,fsid=0,no_subtree_check,no_root_squash)".format(ip))
+            cmds.append("mkdir -p {0}".format(args.nfs_server_directory))
+            cmds.append("""echo "{0} {1}" >> /etc/exports""".format(args.nfs_server_directory, ' '.join(accesses)))
+            cmds.append('service nfs-kernel-server restart')
+
+
+        if 'rodan_worker' in components or 'rodan_web_server' in components:
+            # worker and server share a lot of setting up codes.
+            # set up Python environment
+            cmds.append("apt-get -y install python2.7 git-core python-pip wget autoconf")
+            # Set up app directory and Python virtual environment (copy Rodan source files later)
+            cmds.append("mkdir -p {0}".format(args.rodan_app_directory))
+            cmds.append("cd {0} && pip install virtualenv && virtualenv --no-site-packages rodan_env".format(args.rodan_app_directory))
+            # Install Python packages
+            cmds.append("apt-get -y install libpython-dev lib32ncurses5-dev libxml2-dev libxslt1-dev zlib1g-dev lib32z1-dev libjpeg-dev libpq-dev")
+            cmds.append("cp {0}Rodan/requirements.txt /tmp/requirements.txt".format(args.package_src_directory))
+            cmds.append("source {0}rodan_env/bin/activate && pip install -r /tmp/requirements.txt && deactivate".format(args.rodan_app_directory))
+
+            # Compile packages
+            cmds.append("mkdir -p {0} && chmod 755 {0}".format(args.package_src_directory))
+            ## Install Gamera
+            cmds.append("apt-get -y install libpng-dev libtiff-dev")
+            cmds.append("""cd {0} && wget "http://sourceforge.net/projects/gamera/files/gamera/gamera-3.4.2/gamera-3.4.2.tar.gz/download" -O gamera-3.4.2.tar.gz && tar xvf gamera-3.4.2.tar.gz && source {1}rodan_env/bin/activate && cd gamera-3.4.2 && python setup.py install --nowx && deactivate""".format(args.package_src_directory, args.rodan_app_directory))
+            cmds.append("""cd {0} && wget http://gamera.informatik.hsnr.de/addons/musicstaves/musicstaves-1.3.10.tar.gz && tar xvf musicstaves-1.3.10.tar.gz && source {1}rodan_env/bin/activate && cd musicstaves-1.3.10 && export CFLAGS="-I{0}gamera-3.4.2/include" && python setup.py install && deactivate""".format(args.package_src_directory, args.rodan_app_directory))
+            cmds.append("""cd {0} && git clone https://github.com/DDMAL/document-preprocessing-toolkit.git && cd document-preprocessing-toolkit && source {1}rodan_env/bin/activate && export CFLAGS="-I{0}gamera-3.4.2/include" && cd background-estimation && python setup.py install && cd ../border-removal && python setup.py install && cd ../staffline-removal && python setup.py install && cd ../lyric-extraction && python setup.py install && deactivate""".format(args.package_src_directory, args.rodan_app_directory))
+            cmds.append("""cd {0} && git clone https://github.com/DDMAL/rodan_plugins.git && cd rodan_plugins && source {1}rodan_env/bin/activate && export CFLAGS="-I{0}gamera-3.4.2/include" && python setup.py build && python setup.py install && deactivate""".format(args.package_src_directory, args.rodan_app_directory))
+
+            ## Install LibMEI
+            cmds.append("cp {0}Rodan/helper_scripts/neumes_and_layout_compiled.xml /tmp".format(args.package_src_directory))
+            cmds.append("""cd {0} && git clone https://github.com/DDMAL/libmei.git && \
+            cd libmei/tools && \
+            pip install lxml && \
+            python parseschema2.py -o src -l cpp /tmp/neumes_and_layout_compiled.xml && \
+            python parseschema2.py -o src -l python /tmp/neumes_and_layout_compiled.xml && \
+            rm -rf ../src/modules/* && \
+            rm -rf ../python/pymei/Modules/* && \
+            mv src/cpp/* ../src/modules/ && \
+            mv src/python/* ../python/pymei/Modules/ && \
+            apt-get -y install uuid-dev libxml2-dev cmake && \
+            cd .. && \
+            mkdir build && \
+            cd build && \
+            cmake .. && \
+            make && \
+            make install""".format(args.package_src_directory))
+            cmds.append("""cd {0} && apt-get -y install build-essential python-dev python-setuptools libboost-python-dev libboost-thread-dev && \
+            cd libmei/python && \
+            wget https://gist.githubusercontent.com/lingxiaoyang/3e50398e9fef44b62206/raw/75706f28b9eef76635ca24be6d5f1b90fa5e40de/setup.py.patch && \
+            patch setup.py < setup.py.patch && \
+            source {1}rodan_env/bin/activate && \
+            python setup.py install && deactivate""".format(args.package_src_directory, args.rodan_app_directory))
+
+            ## xmllint
+            cmds.append("""apt-get -y install libxml2-utils""")
+            ## vips
+            cmds.append("""apt-get -y install libvips-tools""")
+
+            if not args.disable_diva:
+                ## Graphics Magick
+                cmds.append("""apt-get -y install graphicsmagick-imagemagick-compat""")
+
+                ## Kakadu
+                cmds.append("""apt-get -y install unzip""")
+                cmds.append("""cd {0} && unzip v7_7-01273N.zip""".format(args.package_src_directory))
+                cmds.append("""cd {0} && cd v7_7-01273N/coresys/make && make -f Makefile-Linux-x86-64-gcc""".format(args.package_src_directory))
+                cmds.append("""cd {0} && cd v7_7-01273N/apps/make && make -f Makefile-Linux-x86-64-gcc""".format(args.package_src_directory))
+                cmds.append("""cd {0} && cp v7_7-01273N/lib/Linux-x86-64-gcc/* /usr/local/lib && cp v7_7-01273N/bin/Linux-x86-64-gcc/* /usr/local/bin""".format(args.package_src_directory))
+
+                if 'rodan_web_server' in components:
+                    ## IIP Server
+                    cmds.append("""cd {0} && git clone https://github.com/ruven/iipsrv.git && apt-get -y install libmemcached-dev libtool && cd iipsrv && ./autogen.sh && ./configure --with-kakadu={0}v7_7-01273N && make -j4 && mkdir -p /srv/fcgi-bin && cp src/iipsrv.fcgi /srv/fcgi-bin""".format(args.package_src_directory))
+
+            # Install NFS client
+            cmds.append("""apt-get -y install nfs-common inotify-tools""")
+            ## Set mount point permissions
+            cmds.append("""mkdir -p {0} && useradd {1} && groupadd {2} && chown {1}:{2} {0}""".format(args.rodan_data_mount_point, args.www_user, args.www_group))
+
+            # Copy Rodan source code
+            cmds.append("""cp -av {0}Rodan/* {1}""".format(args.package_src_directory, args.rodan_app_directory))
+
+            # Update Python requirements
+            cmds.append("""cd {0} && source {0}rodan_env/bin/activate && pip install -r requirements.txt && deactivate""".format(args.rodan_app_directory))
+
+            # Configure Rodan
+            cmds.append("""cd {0} && autoconf""".format(args.rodan_app_directory))
+            params = [
+                '--enable-debug={0}'.format('yes' if args.debug else 'no'),
+                '--disable-diva' if args.disable_diva else '--enable-diva',
+                'MODE={0}'.format('server' if 'rodan_web_server' in components else 'worker'),
+                'RODAN_VENV_DIR={0}rodan_env'.format(args.rodan_app_directory),
+                'RODAN_DATA_DIR={0}'.format(args.rodan_data_mount_point),
+                'AMQP_HOST={0}'.format(ips_cleaned[components_distribution['rodan_task_queue'][0]]),
+                'AMQP_PORT=5672',
+                'AMQP_VHOST={0}'.format(args.amqp_vhost),
+                'AMQP_USER={0}'.format(args.amqp_user),
+                'AMQP_PASSWORD={0}'.format(args.amqp_password),
+                'DB_HOST={0}'.format(ips_cleaned[components_distribution['rodan_database'][0]]),
+                'DB_PORT=5432',
+                'DB_NAME={0}'.format(args.db_name),
+                'DB_USER={0}'.format(args.db_user),
+                'DB_PASSWORD={0}'.format(args.db_password),
+                'DB_SU_USER={0}'.format(args.db_su_user),
+                'DB_SU_PASSWORD={0}'.format(args.db_su_password),
+                'REDIS_HOST={0}'.format(ips_cleaned[components_distribution['rodan_database'][0]]),
+                'REDIS_PORT=6379',
+                'REDIS_DB=0',
+                'WWW_USER={0}'.format(args.www_user),
+                'WWW_GROUP={0}'.format(args.www_group),
+                'DOMAIN_NAME={0}'.format(args.server_domain_name) if 'rodan_web_server' in components else "",
+                'CLIENT_MAX_BODY_SIZE={0}'.format(args.server_client_max_body_size) if 'rodan_web_server' in components else "",
+                'SECRET_KEY={0}'.format(''.join(random.SystemRandom().choice(string.ascii_uppercase + string.digits) for _ in range(40))),
+                'SSL_CERT={0}'.format(args.server_ssl_cert_path) if 'rodan_web_server' in components else "",
+                'SSL_CERT_KEY={0}'.format(args.server_ssl_cert_key_path) if 'rodan_web_server' in components else "",
+                'IIPSRV_FCGI=/srv/fcgi-bin/iipsrv.fcgi' if not args.disable_diva and 'rodan_web_server' in components else "",
+                'PAGINATE_BY={0}'.format(args.server_paginate_by),
+            ]
+            cmds.append("""cd {0} && ./configure {1}""".format(args.rodan_app_directory, ' '.join(params)))
+
+            # Install supervisor
+            cmds.append("""apt-get -y install supervisor""")
+            cmds.append("""cp {0}etc/supervisor/conf.d/rodan.conf /etc/supervisor/conf.d/""".format(args.rodan_app_directory))
+
+            if 'rodan_web_server' in components:
+                # Install nginx
+                cmds.append("""apt-get -y install nginx""")
+                cmds.append("""rm -f /etc/nginx/sites-enabled/rodan && cp {0}etc/nginx/sites-available/rodan /etc/nginx/sites-available && ln -s /etc/nginx/sites-available/rodan /etc/nginx/sites-enabled/rodan""".format(args.rodan_app_directory))
+
+                # Initialize database
+                cmds.append("""cd {0} && source {0}rodan_env/bin/activate && RODAN_PSQL_SUPERUSER_USERNAME={1} RODAN_PSQL_SUPERUSER_PASSWORD={2} python manage.py migrate && echo "from django.contrib.auth.models import User; User.objects.create_superuser('{3}', '', '{4}')" | python manage.py shell && deactivate""".format(
+                    args.rodan_app_directory,
+                    args.db_su_user,
+                    args.db_su_password,
+                    args.rodan_admin_user,
+                    args.rodan_admin_password
+                ))
+
+                # [TODO] additional configuration for CORS
+
+        ######### AUTOSTART commands #########
+        if 'rodan_task_queue' in components:
+            cmds.append('update-rc.d rabbitmq-server defaults; true')
+        if 'rodan_database' in components:
+            cmds.append('update-rc.d postgresql defaults; true')
+            cmds.append('update-rc.d redis-server defaults; true')
+        if 'rodan_resource_file_server' in components:
+            cmds.append('update-rc.d rpcbind defaults; true')
+            cmds.append('update-rc.d nfs-kernel-server defaults; true')
+        if 'rodan_worker' in components or 'rodan_web_server' in components:
+            if 'rodan_web_server' in components:
+                cmds.append('update-rc.d nginx defaults; true')
+            cmds.append('update-rc.d rpcbind defaults; true')
+            cmds.append('echo "%(nfs_server_ip)s:/ %(rodan_data_mount_point)s nfs auto,noatime,nolock,bg,nfsvers=4,intr,tcp,port=2049,actimeo=1800 0 0" >> /etc/fstab' % {
+                'nfs_server_ip': ips_cleaned[components_distribution['rodan_resource_file_server'][0]], # [TODO] localhost IP
+                'rodan_data_mount_point': args.rodan_data_mount_point
+            })
+
+        cmds.append('swapoff /swapfile')
+        shell_commands.append(cmds)
+
+    ## generate script files
+    for i, components in enumerate(components_cleaned):
+        script_filename = os.path.join(args.output_folder, "{0}.sh".format(i+1))
         with open(script_filename, 'w') as g:
             # file head
-            if args.output_script_type == 'dockerfile':
-                g.write('FROM    {0}:{1}\n'.format(os_name, os_version))
-                ## For docker also uses bash instead of original sh (because of virtual environment)
-                g.write("RUN     rm /bin/sh && ln -s /bin/bash /bin/sh\n")
-            elif args.output_script_type == 'bash':
-                g.write("""#!/bin/bash
+            g.write("""#!/bin/bash
 set -e
 if test "$EUID" -ne 0; then
   echo "Please run as root"
   exit 1
 fi\n""")
-                g.write("BASE_DIR=$(pwd)")  # store base dir
-
-            ## update system
-            g.write(RUN('apt-get -y update && apt-get -y upgrade', args.output_script_type)+"\n")
-
-            if 'rodan_task_queue' in components:
-                ## Install RabbitMQ: http://www.rabbitmq.com/install-debian.html
-                g.write(RUN('apt-get install -y wget', args.output_script_type)+"\n")
-                g.write(RUN('echo "# RabbitMQ" >> /etc/apt/sources.list', args.output_script_type)+"\n")
-                g.write(RUN('echo "deb http://www.rabbitmq.com/debian/ testing main" >> /etc/apt/sources.list', args.output_script_type)+"\n")
-                g.write(RUN('cd /tmp && wget https://www.rabbitmq.com/rabbitmq-signing-key-public.asc', args.output_script_type)+"\n")
-                g.write(RUN('apt-key add /tmp/rabbitmq-signing-key-public.asc', args.output_script_type)+"\n")
-                g.write(RUN('apt-get -y update', args.output_script_type)+"\n")
-                g.write(RUN('apt-get -y install rabbitmq-server', args.output_script_type)+"\n")
-                if args.output_script_type == "dockerfile":
-                    ## Fix Celery node name (because Docker hostname is changing)
-                    g.write(RUN('echo "NODENAME=rodan@{0}" >> /etc/rabbitmq/rabbitmq-env.conf'.format(ips_cleaned[i]), args.output_script_type)+"\n")
-
-                # set up RabbitMQ vhost
-                g.write(RUN('service rabbitmq-server start && rabbitmqctl add_user %(username)s %(password)s && rabbitmqctl add_vhost %(vhost)s && rabbitmqctl set_permissions -p %(vhost)s %(username)s ".*" ".*" ".*"' % {
-                    'username': args.amqp_user,
-                    'password': args.amqp_password,
-                    'vhost': args.amqp_vhost
-                }, args.output_script_type)+"\n")
-
-                if args.output_script_type == 'dockerfile':
-                    # expose docker ports
-                    g.write('EXPOSE  5672\n')
-
-            if 'rodan_database' in components:
-                #g.write(RUN('apt-get -y install libpq-dev', args.output_script_type)+"\n")
-                ## Install PostgreSQL
-                g.write(RUN('apt-get -y install postgresql postgresql-contrib', args.output_script_type)+"\n")
-                ## Install PostgreSQL Python language
-                g.write(RUN('apt-get -y install postgresql-plpython', args.output_script_type)+"\n")
-                ## Redis server
-                g.write(RUN('apt-get -y install redis-server', args.output_script_type)+"\n")
-                ## Configure NORMAL user
-                g.write(RUN("""service postgresql start && sudo -u postgres psql --command "create user %(user)s with password '%(password)s'; alter user %(user)s with createdb;" && sudo -u postgres psql --command 'create database %(name)s;' && sudo -u postgres psql --command 'grant all privileges on database "%(name)s" to %(user)s;'""" % {
-                    'name': args.db_name,
-                    'user': args.db_user,
-                    'password': args.db_password
-                }, args.output_script_type)+"\n")
-                ## expose PostgreSQL to allow access from workers' and server's subnet as normal user
-                g.write(RUN("""echo "listen_addresses = '*'" >> /etc/postgresql/9.3/main/postgresql.conf && echo "host  @DB_NAME@  @DB_USER@  @WORKERS_SUBNET@  md5" >> /etc/postgresql/9.3/main/pg_hba.conf""", args.output_script_type)+"\n")
-                for machine_number in set(components_distribution['rodan_worker']+components_distribution['rodan_web_server']):
-                    ip = ips_cleaned[machine_number]
-                    g.write(RUN("""echo "host  %(name)s  %(user)s  %(subnet)s  md5" >> /etc/postgresql/9.3/main/pg_hba.conf""" % {
-                        'name': args.db_name,
-                        'user': args.db_user,
-                        'subnet': ip
-                    }, args.output_script_type)+"\n")
-                ## Configure SUPERUSER
-                g.write(RUN("""service postgresql start && sudo -u postgres psql --command "create user %(su_user)s with password '%(su_password)s'; alter user %(su_user)s with superuser;" """ % {
-                    'su_user': args.db_su_user,
-                    'su_password': args.db_su_password
-                }, args.output_script_type)+"\n")
-                ## expose PostgreSQL to allow access from server as super user
-                for machine_number in set(components_distribution['rodan_web_server']):
-                    ip = ips_cleaned[machine_number]
-                    g.write(RUN("""echo "host  %(name)s  %(su_user)s  %(subnet)s  md5" >> /etc/postgresql/9.3/main/pg_hba.conf""" % {
-                        'name': args.db_name,
-                        'su_user': args.db_su_user,
-                        'subnet': ip
-                    }, args.output_script_type)+"\n")
-
-                if args.output_script_type == 'dockerfile':
-                    # expose docker ports
-                    g.write('EXPOSE  5432\n')
-                    g.write('EXPOSE  6379\n')
-
-            if 'rodan_resource_file_server' in components:
-                # Check kernel modules
-                g.write(RUN('modprobe nfs && modprobe nfsd', args.output_script_type)+"\n")
-                # Install NFS packages
-                g.write(RUN('apt-get -y install nfs-common inotify-tools nfs-kernel-server runit', args.output_script_type)+"\n")
-                # set /etc/exports, expose the folder to workers' and server's subnet
-                accesses = []
-                for machine_number in set(components_distribution['rodan_worker']+components_distribution['rodan_web_server']):
-                    ip = ips_cleaned[machine_number]
-                    accesses.append("{0}(rw,sync,fsid=0,no_subtree_check,no_root_squash)".format(ip))
-                g.write(RUN("""echo "{0} {1}" >> /etc/exports""".format(args.nfs_server_directory, ' '.join(accesses)), args.output_script_type)+"\n")
-
-                if args.output_script_type == 'dockerfile':
-                    # expose docker ports
-                    g.write('EXPOSE  111/udp\n')
-                    g.write('EXPOSE  2049/tcp\n')
-
-            if 'rodan_worker' or 'rodan_web_server' in components:
-                # worker and server share a lot of setting up codes.
-
-                # check source code
-                if args.output_script_type == 'bash':
-                    g.write("""if test ! -d $BASE_DIR/Rodan; then
-  echo "Please put Rodan source code under "Rodan" directory in this folder, and try again."
-  exit 1;
-fi
-""")
-                    g.write("""if test ! -f $BASE_DIR/Rodan/requirements.txt; then
-  echo "Cannot find 'Rodan/requirements.txt'. Please check your Rodan source and try again."
-  exit 1;
-fi
-""")
-                    if not args.disable_diva:
-                        # check kakadu 7.7
-                        g.write("""if test ! -f $BASE_DIR/v7_7-01273N.zip; then
-  echo "Cannot find 'v7_7-01273N.zip'. Please copy your Kakadu source here and try again."
-  exit 1;
-fi
-""")
-
-                # set up Python environment
-                g.write(RUN("apt-get -y install python2.7 git-core python-pip wget autoconf", args.output_script_type)+"\n")
-                # Set up app directory and Python virtual environment (copy Rodan source files later)
-                g.write(RUN("mkdir -p {0}".format(args.rodan_app_directory), args.output_script_type)+"\n")
-                g.write(RUN("cd {0} && pip install virtualenv && virtualenv --no-site-packages rodan_env".format(args.rodan_app_directory), args.output_script_type)+"\n")
-                # Install Python packages
-                g.write(RUN("apt-get -y install libpython-dev lib32ncurses5-dev libxml2-dev libxslt1-dev zlib1g-dev lib32z1-dev libjpeg-dev libpq-dev", args.output_script_type)+"\n")
-                g.write(COPY("Rodan/requirements.txt", "/tmp/requirements.txt", args.output_script_type)+"\n")
-                g.write(RUN("source {0}rodan_env/bin/activate && pip install -r /tmp/requirements.txt && deactivate".format(args.rodan_app_directory), args.output_script_type)+"\n")
-
-                # Compile packages
-                g.write(RUN("mkdir -p {0} && chmod 755 {0}".format(args.package_src_directory), args.output_script_type)+"\n")
-                ## Install Gamera
-                g.write(RUN("apt-get -y install libpng-dev libtiff-dev", args.output_script_type)+"\n")
-                g.write(RUN("""cd {0} && wget "http://sourceforge.net/projects/gamera/files/gamera/gamera-3.4.2/gamera-3.4.2.tar.gz/download" -O gamera-3.4.2.tar.gz && tar xvf gamera-3.4.2.tar.gz && source {1}rodan_env/bin/activate && cd gamera-3.4.2 && python setup.py install --nowx && deactivate""".format(args.package_src_directory, args.rodan_app_directory), args.output_script_type)+"\n")
-                g.write(RUN("""cd {0} && wget http://gamera.informatik.hsnr.de/addons/musicstaves/musicstaves-1.3.10.tar.gz && tar xvf musicstaves-1.3.10.tar.gz && source {1}rodan_env/bin/activate && cd musicstaves-1.3.10 && CFLAGS="-I/src/gamera-3.4.2/include" python setup.py install && deactivate""".format(args.package_src_directory, args.rodan_app_directory), args.output_script_type)+"\n")
-                g.write(RUN("""cd {0} && git clone https://github.com/DDMAL/document-preprocessing-toolkit.git && cd document-preprocessing-toolkit && source {1}rodan_env/bin/activate && CFLAGS="-I/src/gamera-3.4.2/include" && cd background-estimation && python setup.py install && cd ../border-removal && python setup.py install && cd ../staffline-removal && python setup.py install && cd ../lyric-extraction && python setup.py install && deactivate""".format(args.package_src_directory, args.rodan_app_directory), args.output_script_type)+"\n")
-                g.write(RUN("""cd {0} && git clone https://github.com/DDMAL/rodan_plugins.git && cd rodan_plugins && source {1}rodan_env/bin/activate && CFLAGS="-I/src/gamera-3.4.2/include" && python setup.py build && python setup.py install && deactivate""".format(args.package_src_directory, args.rodan_app_directory), args.output_script_type)+"\n")
-
-                ## Install LibMEI
-                g.write(COPY("Rodan/helper_scripts/neumes_and_layout_compiled.xml", "/tmp", args.output_script_type)+"\n")
-                g.write(RUN("""cd {0} && git clone https://github.com/DDMAL/libmei.git && \
-        cd libmei/tools && \
-        pip install lxml && \
-        python parseschema2.py -o src -l cpp /tmp/neumes_and_layout_compiled.xml && \
-        python parseschema2.py -o src -l python /tmp/neumes_and_layout_compiled.xml && \
-        rm -rf ../src/modules/* && \
-        rm -rf ../python/pymei/Modules/* && \
-        mv src/cpp/* ../src/modules/ && \
-        mv src/python/* ../python/pymei/Modules/ && \
-        apt-get -y install uuid-dev libxml2-dev cmake && \
-        cd .. && \
-        mkdir build && \
-        cd build && \
-        cmake .. && \
-        make && \
-        make install""".format(args.package_src_directory), args.output_script_type)+"\n")
-                g.write(RUN("""cd {0} && apt-get -y install build-essential python-dev python-setuptools libboost-python-dev libboost-thread-dev && \
-        cd libmei/python && \
-        wget https://gist.githubusercontent.com/lingxiaoyang/3e50398e9fef44b62206/raw/75706f28b9eef76635ca24be6d5f1b90fa5e40de/setup.py.patch && \
-        patch setup.py < setup.py.patch && \
-        source {1}rodan_env/bin/activate && \
-        python setup.py install && deactivate""".format(args.package_src_directory, args.rodan_app_directory), args.output_script_type)+"\n")
-
-                ## xmllint
-                g.write(RUN("""apt-get -y install libxml2-utils""", args.output_script_type)+"\n")
-                ## vips
-                g.write(RUN("""apt-get -y install libvips-tools""", args.output_script_type)+"\n")
-
-                if not args.disable_diva:
-                    ## Graphics Magick
-                    g.write(RUN("""apt-get -y install graphicsmagick-imagemagick-compat""", args.output_script_type)+"\n")
-
-                    ## Kakadu
-                    g.write(COPY("v7_7-01273N.zip", args.package_src_directory, args.output_script_type)+"\n")
-                    g.write(RUN("""apt-get -y install unzip""", args.output_script_type)+"\n")
-                    g.write(RUN("""cd {0} && unzip v7_7-01273N.zip""".format(args.package_src_directory), args.output_script_type)+"\n")
-                    g.write(RUN("""cd {0} && cd v7_7-01273N/coresys/make && make -f Makefile-Linux-x86-64-gcc""".format(args.package_src_directory), args.output_script_type)+"\n")
-                    g.write(RUN("""cd {0} && cd v7_7-01273N/apps/make && make -f Makefile-Linux-x86-64-gcc""".format(args.package_src_directory), args.output_script_type)+"\n")
-                    g.write(RUN("""cd {0} && cp v7_7-01273N/lib/Linux-x86-64-gcc/* /usr/local/lib && cp v7_7-01273N/bin/Linux-x86-64-gcc/* /usr/local/bin""".format(args.package_src_directory), args.output_script_type)+"\n")
-
-                    if 'rodan_web_server' in components:
-                        ## IIP Server
-                        g.write(RUN("""cd {0} && git clone https://github.com/ruven/iipsrv.git && apt-get -y install libmemcached-dev libtool && cd iipsrv && ./autogen.sh && ./configure --with-kakadu={0}v7_7-01273N && make -j4 && mkdir -p /srv/fcgi-bin && cp src/iipsrv.fcgi /srv/fcgi-bin""".format(args.package_src_directory), args.output_script_type)+"\n")
-
-                # Install NFS client
-                g.write(RUN("""apt-get -y install nfs-common inotify-tools""", args.output_script_type)+"\n")
-                ## Set mount point permissions
-                g.write(RUN("""mkdir -p {0} && chown {1}:{2} {0}""".format(args.rodan_data_mount_point, args.www_user, args.www_group), args.output_script_type)+"\n")
-
-                # Update Rodan source code and Python requirements
-                if args.output_script_type == 'dockerfile':
-                    g.write("# For Docker: modify this 'echo' and trigger the update of Rodan source code.\n")
-                    g.write('RUN     echo "Copying Rodan source..."\n')
-                    g.write('COPY    Rodan {0}'.format(args.rodan_app_directory.rstrip('/'))+"\n")
-                elif args.output_script_type == "bash":
-                    g.write('cp -av $BASE_DIR/Rodan/* {0}'.format(args.rodan_app_directory)+"\n")
-                g.write(RUN("""cd {0} && source {1}rodan_env/bin/activate && pip install -r requirements.txt && deactivate""".format(args.package_src_directory, args.rodan_app_directory), args.output_script_type)+"\n")
-
-                # Configure Rodan
-                g.write(RUN("""cd {0} && autoconf""".format(args.package_src_directory), args.output_script_type)+"\n")
-                params = [
-                    '--enable-debug={0}'.format('yes' if args.debug else 'no'),
-                    '--disable-diva' if args.disable_diva else '--enable-diva',
-                    'MODE={0}'.format('server' if 'rodan_web_server' in components else 'worker'),
-                    'RODAN_VENV_DIR={0}rodan_env'.format(args.rodan_app_directory),
-                    'RODAN_DATA_DIR={0}'.format(args.rodan_data_mount_point),
-                    'AMQP_HOST={0}'.format(ips_cleaned[components_distribution['rodan_task_queue'][0]]),
-                    'AMQP_PORT=5672',
-                    'AMQP_VHOST={0}'.format(args.amqp_vhost),
-                    'AMQP_USER={0}'.format(args.amqp_user),
-                    'AMQP_PASSWORD={0}'.format(args.amqp_password),
-                    'DB_HOST={0}'.format(ips_cleaned[components_distribution['rodan_database'][0]]),
-                    'DB_PORT=5432',
-                    'DB_NAME={0}'.format(args.db_name),
-                    'DB_USER={0}'.format(args.db_user),
-                    'DB_PASSWORD={0}'.format(args.db_password),
-                    'DB_SU_USER={0}'.format(args.db_su_user),
-                    'DB_SU_PASSWORD={0}'.format(args.db_su_password),
-                    'REDIS_HOST={0}'.format(ips_cleaned[components_distribution['rodan_database'][0]]),
-                    'REDIS_PORT=6379',
-                    'REDIS_DB=0',
-                    'WWW_USER={0}'.format(args.www_user),
-                    'WWW_GROUP={0}'.format(args.www_group),
-                    'DOMAIN_NAME={0}'.format(args.server_domain_name) if 'rodan_web_server' in components else "",
-                    'CLIENT_MAX_BODY_SIZE={0}'.format(args.server_client_max_body_size) if 'rodan_web_server' in components else "",
-                    'SECRET_KEY={0}'.format(''.join(random.SystemRandom().choice(string.ascii_uppercase + string.digits) for _ in range(40))),
-                    'SSL_CERT={0}'.format(args.server_ssl_cert_path) if 'rodan_web_server' in components else "",
-                    'SSL_CERT_KEY={0}'.format(args.server_ssl_cert_key_path) if 'rodan_web_server' in components else "",
-                    'IIPSRV_FCGI=/srv/fcgi-bin/iipsrv.fcgi' if not args.disable_diva and 'rodan_web_server' in components else "",
-                    'PAGINATE_BY={0}'.format(args.server_paginate_by),
-                ]
-                g.write(RUN("""cd {0} && ./configure {1}""".format(args.package_src_directory, ' '.join(params)), args.output_script_type)+"\n")
-
-                # Install supervisor
-                g.write(RUN("""apt-get -y install supervisor""", args.output_script_type)+"\n")
-                g.write(RUN("""cp {0}etc/supervisor/conf.d/rodan.conf /etc/supervisor/conf.d/""".format(args.rodan_app_directory), args.output_script_type)+"\n")
-
-                if 'rodan_web_server' in components:
-                    # Install nginx
-                    g.write(RUN("""apt-get -y install nginx""", args.output_script_type)+"\n")
-                    g.write(RUN("""rm /etc/nginx/sites-enabled/rodan && cp {0}etc/nginx/sites-available/rodan /etc/nginx/sites-available && ln -s /etc/nginx/sites-available/rodan /etc/nginx/sites-enabled/rodan""".format(args.rodan_app_directory), args.output_script_type)+"\n")
-
-                    # Initialize database
-                    g.write(RUN("""cd {0} && service postgresql start && service redis-server start && source {0}rodan_env/bin/activate && RODAN_PSQL_SUPERUSER_USERNAME={1} RODAN_PSQL_SUPERUSER_PASSWORD={2} python manage.py migrate && echo "from django.contrib.auth.models import User; User.objects.create_superuser('{3}', '', '{4}')" | python manage.py shell && deactivate""".format(
-                        args.rodan_app_directory,
-                        args.db_su_user,
-                        args.db_su_password,
-                        args.rodan_admin_user,
-                        args.rodan_admin_password
-                    ), args.output_script_type)+"\n")
-
-                    # [TODO] additional configuration for CORS
-
-                    if 'rodan_web_server' in components:
-                        # expose docker ports
-                        g.write('EXPOSE  80\n')
-                    # docker entrypoint
-                    g.write('ENTRYPOINT  {0}\n'.format(' && '.join(entrypoint_cmds)))
-
-
-            # docker entrypoint
-            if args.output_script_type == 'dockerfile':
-                entrypoint_cmds = []
-                if 'rodan_task_queue' in components:
-                    entrypoint_cmds.append('service rabbitmq-server start')
-                if 'rodan_database' in components:
-                    entrypoint_cmds.append('service postgresql start')
-                    entrypoint_cmds.append('service redis-server start')
-                if 'rodan_resource_file_server' in components:
-                    entrypoint_cmds.append('service rpcbind start')
-                    entrypoint_cmds.append('service nfs-kernel-server start')
-                if 'rodan_worker' or 'rodan_web_server' in components:
-                    if 'rodan_web_server' in components:
-                        entrypoint_cmds.append('service nginx start')
-                    entrypoint_cmds.append('service rpcbind start')
-                    entrypoint_cmds.append('mount -t nfs -o proto=tcp,port=2049 %(nfs_server_ip)s:/ %(rodan_data_mount_point)s' % {
-                        'nfs_server_ip': ips_cleaned[components_distribution['rodan_resource_file_server'][0]], # [TODO] localhost IP
-                        'rodan_data_mount_point': args.rodan_data_mount_point
-                    })
-                g.write('ENTRYPOINT  {0}\n'.format(' && '.join(entrypoint_cmds)))
-
+            g.write("\n".join(shell_commands[i])+"\n")
 
         # add executable permission
         st = os.stat(script_filename)
         os.chmod(script_filename, st.st_mode | stat.S_IEXEC)
 
         MSG_NOTICE("Wrote {0}".format(script_filename))
+
+    # generate Vagrantfile
+    vfile_name = os.path.join(args.output_folder, "Vagrantfile")
+    with open(vfile_name, 'w') as g:
+        g.write('Vagrant.configure("2") do |config|\n')
+        g.write('  config.vm.provision "shell", inline: "echo Rodan Deployment Test"\n')
+        g.write('  config.vm.box = "ubuntu/trusty64"\n')
+
+        for i, components in enumerate(components_cleaned):
+            g.write('\n')
+            g.write('  config.vm.define "m{0}" do |m|\n'.format(i+1))
+            if i in components_distribution['rodan_web_server']:
+                g.write('    m.vm.network "forwarded_port", guest: 80, host: 8080\n')
+            #if i in components_distribution['rodan_web_server'] or i in components_distribution['rodan_worker']:
+            #    g.write('    m.vm.provider "virtualbox" do |vb|\n')
+            #    g.write('      vb.memory="1024"\n')
+            #    g.write('    end\n')
+            g.write('    m.vm.network "private_network", ip: "{0}"\n'.format(ips_cleaned[i]))
+            g.write('    m.vm.provision "shell", inline: <<-SHELL\n')
+            g.write('      mkdir -p {0}\n'.format(args.package_src_directory))
+            g.write('      cp -av /vagrant/Rodan {0}\n'.format(args.package_src_directory))
+            if not args.disable_diva:
+                g.write('      cp /vagrant/v7_7-01273N.zip {0}\n'.format(args.package_src_directory))
+            # Copy SSL cert and key
+            g.write('      mkdir -p `dirname {0}`\n'.format(args.server_ssl_cert_path))
+            g.write('      cp /vagrant/rodan.crt {0}\n'.format(args.server_ssl_cert_path))
+            g.write('      mkdir -p `dirname {0}`\n'.format(args.server_ssl_cert_key_path))
+            g.write('      cp /vagrant/rodan.key {0}\n'.format(args.server_ssl_cert_key_path))
+            g.write('    SHELL\n')
+            g.write('    m.vm.provision "shell" do |shell|\n')
+            g.write('      shell.path = "{0}.sh"\n'.format(i+1))
+            g.write('    end\n')
+            g.write('  end\n')
+        g.write('end\n')
+
+    MSG_NOTICE("Wrote {0}".format(vfile_name))
+    MSG_NOTICE("Visit https://127.0.0.1:8080 after vagrant up")
 
 
 if __name__ == "__main__":
