@@ -56,8 +56,6 @@ Examples:
     parser.add_argument('--rodan-app-directory', required=True, type=str, help="the directory on Rodan workers and web server that will contain Rodan code")
     parser.add_argument('--rodan-data-mount-point', required=True, type=str, help="where other Rodan workers and Rodan server mount the resource files")
     parser.add_argument('--package-src-directory', required=True, type=str, help="the directory on Rodan workers and web server that will contain the source codes of packages that Rodan require")
-    parser.add_argument('--www-user', type=str, default="www-user", help="the Unix username that will run Rodan workers and web server")
-    parser.add_argument('--www-group', type=str, default="www-group", help="the Unix user group that will run Rodan workers and web server")
     parser.add_argument('--rodan-admin-user', required=True, type=str, help="Rodan admin user name")
     parser.add_argument('--rodan-admin-password', required=True, type=str, help="Rodan admin user password")
 
@@ -180,6 +178,10 @@ fi""".format(args.server_ssl_cert_path))
 fi""".format(args.server_ssl_cert_key_path))
 
 
+        ## set hostname
+        cmds.append('hostname rodan_m{0}'.format(i+1))  # temporary
+        cmds.append('echo "rodan_m{0}" > /etc/hostname'.format(i+1))  # permanent
+
         ## update system
         cmds.append('apt-get -y update && apt-get -y upgrade')
 
@@ -212,6 +214,9 @@ fi""".format(args.server_ssl_cert_key_path))
             cmds.append('apt-get -y install postgresql-plpython')
             ## Redis server
             cmds.append('apt-get -y install redis-server')
+            ## Redis-Python binding
+            cmds.append('apt-get -y install python-pip')
+            cmds.append('pip install redis')
             ## Configure NORMAL user
             cmds.append("""service postgresql start && sudo -u postgres psql --command "create user %(user)s with password '%(password)s'; alter user %(user)s with createdb;" && sudo -u postgres psql --command 'create database %(name)s;' && sudo -u postgres psql --command 'grant all privileges on database "%(name)s" to %(user)s;'""" % {
                 'name': args.db_name,
@@ -222,10 +227,10 @@ fi""".format(args.server_ssl_cert_key_path))
             cmds.append("""echo "listen_addresses = '*'" >> /etc/postgresql/9.3/main/postgresql.conf && echo "#host  @DB_NAME@  @DB_USER@  @WORKERS_SUBNET@  md5" >> /etc/postgresql/9.3/main/pg_hba.conf""")
             for machine_number in set(components_distribution['rodan_worker']+components_distribution['rodan_web_server']):
                 ip = ips_cleaned[machine_number]
-                cmds.append("""echo "host  %(name)s  %(user)s  %(subnet)s  md5" >> /etc/postgresql/9.3/main/pg_hba.conf""" % {
+                cmds.append("""echo "host  %(name)s  %(user)s  %(ip)s/32  md5" >> /etc/postgresql/9.3/main/pg_hba.conf""" % {
                     'name': args.db_name,
                     'user': args.db_user,
-                    'subnet': ip
+                    'ip': ip
                 })
             ## Configure SUPERUSER
             cmds.append("""service postgresql start && sudo -u postgres psql --command "create user %(su_user)s with password '%(su_password)s'; alter user %(su_user)s with superuser;" """ % {
@@ -235,10 +240,10 @@ fi""".format(args.server_ssl_cert_key_path))
             ## expose PostgreSQL to allow access from server as super user
             for machine_number in set(components_distribution['rodan_web_server']):
                 ip = ips_cleaned[machine_number]
-                cmds.append("""echo "host  %(name)s  %(su_user)s  %(subnet)s  md5" >> /etc/postgresql/9.3/main/pg_hba.conf""" % {
+                cmds.append("""echo "host  %(name)s  %(su_user)s  %(ip)s/32  md5" >> /etc/postgresql/9.3/main/pg_hba.conf""" % {
                     'name': args.db_name,
                     'su_user': args.db_su_user,
-                    'subnet': ip
+                    'ip': ip
                 })
             cmds.append('service postgresql restart')
 
@@ -326,7 +331,7 @@ fi""".format(args.server_ssl_cert_key_path))
             # Install NFS client
             cmds.append("""apt-get -y install nfs-common inotify-tools""")
             ## Set mount point permissions
-            cmds.append("""mkdir -p {0} && useradd {1} && groupadd {2} && chown {1}:{2} {0}""".format(args.rodan_data_mount_point, args.www_user, args.www_group))
+            cmds.append("""mkdir -p {0} && chown www-data:www-data {0}""".format(args.rodan_data_mount_point))
 
             # Copy Rodan source code
             cmds.append("""cp -av {0}Rodan/* {1}""".format(args.package_src_directory, args.rodan_app_directory))
@@ -354,11 +359,8 @@ fi""".format(args.server_ssl_cert_key_path))
                 'DB_PASSWORD={0}'.format(args.db_password),
                 'DB_SU_USER={0}'.format(args.db_su_user),
                 'DB_SU_PASSWORD={0}'.format(args.db_su_password),
-                'REDIS_HOST={0}'.format(ips_cleaned[components_distribution['rodan_database'][0]]),
-                'REDIS_PORT=6379',
-                'REDIS_DB=0',
-                'WWW_USER={0}'.format(args.www_user),
-                'WWW_GROUP={0}'.format(args.www_group),
+                'WWW_USER=www-data',
+                'WWW_GROUP=www-data',
                 'DOMAIN_NAME={0}'.format(args.server_domain_name) if 'rodan_web_server' in components else "",
                 'CLIENT_MAX_BODY_SIZE={0}'.format(args.server_client_max_body_size) if 'rodan_web_server' in components else "",
                 'SECRET_KEY={0}'.format(''.join(random.SystemRandom().choice(string.ascii_uppercase + string.digits) for _ in range(40))),
@@ -388,6 +390,8 @@ fi""".format(args.server_ssl_cert_key_path))
                 ))
 
                 # [TODO] additional configuration for CORS
+            # Set Rodan dir permission
+            cmds.append('chown -R www-data:www-data {0}'.format(args.rodan_app_directory))
 
         ######### AUTOSTART commands #########
         if 'rodan_task_queue' in components:
@@ -408,6 +412,7 @@ fi""".format(args.server_ssl_cert_key_path))
             })
 
         cmds.append('swapoff /swapfile')
+        cmds.append('reboot')
         shell_commands.append(cmds)
 
     ## generate script files
@@ -441,6 +446,7 @@ fi\n""")
             g.write('  config.vm.define "m{0}" do |m|\n'.format(i+1))
             if i in components_distribution['rodan_web_server']:
                 g.write('    m.vm.network "forwarded_port", guest: 80, host: 8080\n')
+                g.write('    m.vm.network "forwarded_port", guest: 443, host: 8443\n')
             #if i in components_distribution['rodan_web_server'] or i in components_distribution['rodan_worker']:
             #    g.write('    m.vm.provider "virtualbox" do |vb|\n')
             #    g.write('      vb.memory="1024"\n')

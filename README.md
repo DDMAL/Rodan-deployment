@@ -37,10 +37,10 @@ python configure.py \
 
 5. The script will generate an output folder. In this folder, you will find `configuration.json` that stores all parameters and machine configurations. You will also find `{i}.sh` and `Vagrantfile`.
 
-6a. For testing purposes, copy necessary files into this output folder as explained below. Then install Vagrant and run `vagrant up` in the same folder.
+6a. For testing purposes, copy necessary files into this output folder as explained below. Then install Vagrant and run `vagrant up` in the same folder. ([SSL certificate guide](http://www.akadia.com/services/ssh_test_certificate.html))
 
 ````
-- Rodan             a folder that stores Rodan code. You can git clone https://github.com/DDMAL/Rodan.git
+- Rodan             a folder that stores Rodan code. You can: git clone --recursive https://github.com/DDMAL/Rodan.git
 - v7_7-01273N.zip   Kakadu source code. If you do not disable Diva.js, you will need to provide this proprietary package.
 - rodan.crt         SSL certificate for the HTTPS server. (Rodan enforces HTTPS.)
 - rodan.key         SSL certificate private key for the HTTPS server.
