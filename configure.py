@@ -179,8 +179,8 @@ fi""".format(args.server_ssl_cert_key_path))
 
 
         ## set hostname
-        cmds.append('hostname rodan_m{0}'.format(i+1))  # temporary
-        cmds.append('echo "rodan_m{0}" > /etc/hostname'.format(i+1))  # permanent
+        cmds.append('hostname rodan-m{0}'.format(i+1))  # temporary
+        cmds.append('echo "rodan-m{0}" > /etc/hostname'.format(i+1))  # permanent
 
         ## update system
         cmds.append('apt-get -y update && apt-get -y upgrade')
@@ -246,6 +246,14 @@ fi""".format(args.server_ssl_cert_key_path))
                     'ip': ip
                 })
             cmds.append('service postgresql restart')
+            ## expose Redis to allow access from server
+            cmds.append("cat /etc/redis/redis.conf | sed '/^bind / d' > /etc/redis/redis.conf") # bind to all interfaces
+            cmds.append('iptables -I INPUT -p tcp --dport 6379 -j DROP')
+            for machine_number in set(components_distribution['rodan_web_server']):
+                ip = ips_cleaned[machine_number]
+                cmds.append('iptables -I INPUT -p tcp --dport 6379 -s {0} -j ACCEPT'.format(ip))
+                cmds.append('iptables -I OUTPUT -p tcp --sport 6379 -d {0} -j ACCEPT'.format(ip))
+            cmds.append('service redis-server restart')
 
         if 'rodan_resource_file_server' in components:
             # Check kernel modules
@@ -359,6 +367,9 @@ fi""".format(args.server_ssl_cert_key_path))
                 'DB_PASSWORD={0}'.format(args.db_password),
                 'DB_SU_USER={0}'.format(args.db_su_user),
                 'DB_SU_PASSWORD={0}'.format(args.db_su_password),
+                'REDIS_HOST={0}'.format(ips_cleaned[components_distribution['rodan_database'][0]]),
+                'REDIS_PORT=6379',
+                'REDIS_DB=0',
                 'WWW_USER=www-data',
                 'WWW_GROUP=www-data',
                 'DOMAIN_NAME={0}'.format(args.server_domain_name) if 'rodan_web_server' in components else "",
@@ -410,6 +421,8 @@ fi""".format(args.server_ssl_cert_key_path))
                 'nfs_server_ip': ips_cleaned[components_distribution['rodan_resource_file_server'][0]], # [TODO] localhost IP
                 'rodan_data_mount_point': args.rodan_data_mount_point
             })
+            cmds.append('mount {0}'.format(args.rodan_data_mount_point))
+            cmds.append('chown -R www-data:www-data {0}'.format(args.rodan_data_mount_point))  # change permission of the mount folder
 
         cmds.append('swapoff /swapfile')
         cmds.append('reboot')
