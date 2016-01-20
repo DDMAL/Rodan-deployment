@@ -13,6 +13,15 @@ import socket
 import json
 import random, string
 
+import re
+def is_valid_hostname(hostname):
+    if len(hostname) > 255-5:  # reserve few characters...
+        return False
+    if hostname[-1] == ".":
+        hostname = hostname[:-1] # strip exactly one dot from the right, if present
+    allowed = re.compile("(?!-)[A-Z\d-]{1,63}(?<!-)$", re.IGNORECASE)
+    return all(allowed.match(x) for x in hostname.split("."))
+
 def MSG_ERROR(msg):
     FAIL = '\033[91m'  # color code for red
     ENDC = '\033[0m'   # color code end
@@ -47,7 +56,7 @@ Examples:
 
     parser.add_argument('--nfs-server-directory', required=True, type=str, help="the local directory shared by Rodan resource file server")
 
-    parser.add_argument('--server-domain-name', required=True, type=str, help="Rodan server domain name")
+    parser.add_argument('--server-domain-name', required=True, type=str, help="Rodan server domain name (also as the hostname suffix of machines)")
     parser.add_argument('--server-paginate-by', required=True, type=int, help="Rodan server PAGINATE_BY setting (the number of objects on a page)")
     parser.add_argument('--server-client-max-body-size', required=True, type=str, help="the maximum size of HTTP request that Rodan server will allow (e.g., 20M, 2G, or etc.). It should be related to the size of resource file.")
     parser.add_argument('--server-ssl-cert-path', required=True, type=str, help="Rodan server SSL certification path")
@@ -64,6 +73,12 @@ Examples:
 
 
     args = parser.parse_args()
+
+    # check domain name
+    if not is_valid_hostname(args.server_domain_name):
+        MSG_ERROR("{0} is not a valid domain name.".format(args.server_domain_name))
+    if args.server_domain_name[-1] == ".":
+        args.server_domain_name = args.server_domain_name[:-1]
 
     # for all directories, add trailing slash
     args.rodan_app_directory = os.path.join(args.rodan_app_directory, '')
@@ -179,8 +194,8 @@ fi""".format(args.server_ssl_cert_key_path))
 
 
         ## set hostname
-        cmds.append('hostname rodan-m{0}'.format(i+1))  # temporary
-        cmds.append('echo "rodan-m{0}" > /etc/hostname'.format(i+1))  # permanent
+        cmds.append('echo "m{0}.{1}" > /etc/hostname'.format(i+1, args.server_domain_name))  # permanent
+        cmds.append('hostname `cat /etc/hostname`')  # temporary
 
         ## update system
         cmds.append('apt-get -y update && apt-get -y upgrade')
@@ -253,7 +268,6 @@ fi""".format(args.server_ssl_cert_key_path))
                 ip = ips_cleaned[machine_number]
                 cmds.append('iptables -I INPUT -p tcp --dport 6379 -s {0} -j ACCEPT'.format(ip))
                 cmds.append('iptables -I OUTPUT -p tcp --sport 6379 -d {0} -j ACCEPT'.format(ip))
-            cmds.append('service redis-server restart')
 
         if 'rodan_resource_file_server' in components:
             # Check kernel modules
