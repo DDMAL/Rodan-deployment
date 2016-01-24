@@ -268,6 +268,7 @@ fi""".format(args.server_ssl_cert_key_path))
                 ip = ips_cleaned[machine_number]
                 cmds.append('iptables -I INPUT -p tcp --dport 6379 -s {0} -j ACCEPT'.format(ip))
                 cmds.append('iptables -I OUTPUT -p tcp --sport 6379 -d {0} -j ACCEPT'.format(ip))
+            cmds.append('iptables-save & ufw reload & iptables -F')
 
         if 'rodan_resource_file_server' in components:
             # Check kernel modules
@@ -431,6 +432,7 @@ fi""".format(args.server_ssl_cert_key_path))
             if 'rodan_web_server' in components:
                 cmds.append('update-rc.d nginx defaults; true')
             cmds.append('update-rc.d rpcbind defaults; true')
+            cmds.append('update-rc.d supervisor defaults; true')
             cmds.append('echo "%(nfs_server_ip)s:/ %(rodan_data_mount_point)s nfs auto,noatime,nolock,bg,nfsvers=4,intr,tcp,port=2049,actimeo=1800 0 0" >> /etc/fstab' % {
                 'nfs_server_ip': ips_cleaned[components_distribution['rodan_resource_file_server'][0]], # [TODO] localhost IP
                 'rodan_data_mount_point': args.rodan_data_mount_point
