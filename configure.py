@@ -369,7 +369,7 @@ fi""".format(args.server_ssl_cert_key_path))
                 '--disable-diva' if args.disable_diva else '--enable-diva',
                 'MODE={0}'.format('server' if 'rodan_web_server' in components else 'worker'),
                 'RODAN_VENV_DIR={0}rodan_env'.format(args.rodan_app_directory),
-                'RODAN_DATA_DIR={0}'.format(args.rodan_data_mount_point),
+                'RODAN_DATA_DIR={0}'.format(args.rodan_data_mount_point if 'rodan_resource_file_server' not in components else args.nfs_server_directory),
                 'AMQP_HOST={0}'.format(ips_cleaned[components_distribution['rodan_task_queue'][0]]),
                 'AMQP_PORT=5672',
                 'AMQP_VHOST={0}'.format(args.amqp_vhost),
@@ -434,7 +434,7 @@ fi""".format(args.server_ssl_cert_key_path))
             cmds.append('update-rc.d rpcbind defaults; true')
             cmds.append('update-rc.d supervisor defaults; true')
             cmds.append('echo "%(nfs_server_ip)s:/ %(rodan_data_mount_point)s nfs auto,noatime,nolock,bg,nfsvers=4,intr,tcp,port=2049,actimeo=1800 0 0" >> /etc/fstab' % {
-                'nfs_server_ip': ips_cleaned[components_distribution['rodan_resource_file_server'][0]], # [TODO] localhost IP
+                'nfs_server_ip': ips_cleaned[components_distribution['rodan_resource_file_server'][0]],
                 'rodan_data_mount_point': args.rodan_data_mount_point
             })
             cmds.append('mount {0}'.format(args.rodan_data_mount_point))
