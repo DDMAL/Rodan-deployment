@@ -10,7 +10,7 @@ Usage
 
 3. Assign static IP addresses for all machines. Open HTTP and HTTPS ports on the web server.
 
-4. Run `configure.py`. An example usage is shown below. You can modify the configuration parameters according to the information given by `python configure.py --help`.
+4. Run `configure.py`. An example usage is shown below. You can modify the configuration parameters according to the information given by `python configure.py --help`. *Note: put `rodan_web_server` and `rodan_worker` no later than all other components as the setup of workers and servers require databases, file system and task queue.*
 
 ````
 python configure.py \

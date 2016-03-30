@@ -293,7 +293,11 @@ fi""".format(args.server_ssl_cert_key_path))
             cmds.append("mkdir -p {0}".format(args.rodan_app_directory))
             cmds.append("cd {0} && pip install virtualenv && virtualenv --no-site-packages rodan_env".format(args.rodan_app_directory))
             # Install Python packages
-            cmds.append("apt-get -y install libpython-dev lib32ncurses5-dev libxml2-dev libxslt1-dev zlib1g-dev lib32z1-dev libjpeg-dev libpq-dev")
+            cmds.append("apt-get -y install libpython-dev lib32ncurses5-dev libxml2-dev libxslt1-dev zlib1g-dev lib32z1-dev libjpeg-dev libjpeg8-dev libpq-dev")
+            ## prepare libjpeg for PIL. http://stackoverflow.com/questions/8915296/python-image-library-fails-with-message-decoder-jpeg-not-available-pil
+            cmds.append("sudo ln -s /usr/lib/x86_64-linux-gnu/libjpeg.so /usr/lib")
+            cmds.append("sudo ln -s /usr/lib/x86_64-linux-gnu/libfreetype.so /usr/lib")
+            cmds.append("sudo ln -s /usr/lib/x86_64-linux-gnu/libz.so /usr/lib")
             cmds.append("cp {0}Rodan/requirements.txt /tmp/requirements.txt".format(args.package_src_directory))
             cmds.append("source {0}rodan_env/bin/activate && pip install -r /tmp/requirements.txt && deactivate".format(args.rodan_app_directory))
 
@@ -357,7 +361,7 @@ fi""".format(args.server_ssl_cert_key_path))
             cmds.append("""mkdir -p {0} && chown www-data:www-data {0}""".format(args.rodan_data_mount_point))
 
             # Copy Rodan source code
-            cmds.append("""cp -av {0}Rodan/* {1}""".format(args.package_src_directory, args.rodan_app_directory))
+            cmds.append("""rsync -a --progress {0}Rodan {1}/""".format(args.package_src_directory, os.path.abspath(os.path.join(args.rodan_app_directory, os.pardir))))
 
             # Update Python requirements
             cmds.append("""cd {0} && source {0}rodan_env/bin/activate && pip install -r requirements.txt && deactivate""".format(args.rodan_app_directory))
